@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     # ── Aplicacao ────────────────────────────────
     APP_NAME: str = "Juris Intelligence API"
-    APP_VERSION: str = "0.2.0"
+    APP_VERSION: str = "0.3.0"
     DEBUG: bool = True
 
     # ── Banco de Dados ─────────────────────────────
@@ -32,7 +32,13 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
-    # ── LLM / IA (preparado para integracao) ─────
+    # ── LLM / IA ─────────────────────────────────
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.0-flash"
+    GEMINI_TEMPERATURE: float = 0.2
+    GEMINI_MAX_TOKENS: int = 8192
+
+    # ── Legacy (mantido para compatibilidade) ────
     OPENAI_API_KEY: str = ""
     LLM_MODEL: str = "gpt-4o"
     LLM_TEMPERATURE: float = 0.2

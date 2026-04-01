@@ -9,6 +9,7 @@ Para iniciar o worker Celery (em outro terminal):
 """
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.database import Base, engine
@@ -26,6 +27,15 @@ app = FastAPI(
         "API de Inteligencia Juridica Avancada — "
         "Jurimetria Preditiva, Gestao de Testemunhas, Litigation Finance"
     ),
+)
+
+# ── CORS (permite frontend chamar a API) ────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ── Registrar routers dos dominios ───────────────

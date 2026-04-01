@@ -5,7 +5,7 @@ Este modulo contem as tarefas pesadas que NAO devem rodar no loop do FastAPI.
 Cada tarefa:
     1. Recebe um ID (nao o objeto inteiro — serializacao JSON)
     2. Abre sua propria sessao de banco
-    3. Processa a logica (IA/NLP)
+    3. Processa a logica (IA/NLP via Gemini ou fallback heuristico)
     4. Atualiza o banco com o resultado
     5. Fecha a sessao
 
@@ -17,7 +17,6 @@ Para iniciar o worker:
 """
 
 import logging
-import time
 
 from celery import states
 
@@ -26,31 +25,6 @@ from app.core.database import SessionLocal
 from app.domains.shared.models import Depoimento, StatusDepoimento
 
 logger = logging.getLogger(__name__)
-
-
-# ── Marcadores de incerteza (mock NLP) ───────────
-# TODO(NLP): Substituir por modelo de NLP real (ex: BERT fine-tuned
-# para deteccao de hedging/incerteza em textos juridicos pt-BR)
-MARCADORES_INCERTEZA = [
-    "nao tenho certeza",
-    "acho que",
-    "talvez",
-    "nao me lembro",
-    "pode ser que",
-    "se nao me engano",
-    "nao sei ao certo",
-    "acredito que",
-    "me parece que",
-]
-
-PARES_CONTRADITORIOS = [
-    ("estava presente", "nao estava presente"),
-    ("vi claramente", "nao consegui ver"),
-    ("antes do", "depois do"),
-    ("confirmou", "negou"),
-    ("concordou", "discordou"),
-    ("disse que sim", "disse que nao"),
-]
 
 
 @celery_app.task(
@@ -63,14 +37,15 @@ PARES_CONTRADITORIOS = [
 def analisar_contradicao_testemunhas_task(self, depoimento_id: int) -> dict:
     """Analisa um depoimento em busca de contradicoes com testemunhos anteriores.
 
-    Esta tarefa simula o processamento de IA que, em producao, sera feito
-    pelo agent_system (Agente Analista Logico + Agente Supervisor).
+    Utiliza o Google Gemini como cerebro de IA para analise semantica profunda.
+    Em caso de falha do Gemini (sem API key, rate limit, timeout), cai
+    automaticamente para analise heuristica local (fallback).
 
     Fluxo:
         1. Busca o depoimento e muda status para PROCESSANDO
-        2. Simula processamento pesado de NLP (sleep)
-        3. Executa analise de incertezas e contradicoes (mock)
-        4. Atualiza o depoimento com os resultados
+        2. Coleta depoimentos anteriores do mesmo processo
+        3. Envia para GeminiLegalAgent.analisar_contradicoes_depoimentos()
+        4. Atualiza o depoimento com os resultados da IA
         5. Muda status para CONCLUIDO
 
     Args:
@@ -79,6 +54,8 @@ def analisar_contradicao_testemunhas_task(self, depoimento_id: int) -> dict:
     Returns:
         dict com score_confiabilidade e resumo da analise.
     """
+    from app.domains.agent_system.gemini_service import GeminiLegalAgent
+
     db = SessionLocal()
 
     try:
@@ -98,30 +75,7 @@ def analisar_contradicao_testemunhas_task(self, depoimento_id: int) -> dict:
             f"testemunha='{depoimento.testemunha_nome}')"
         )
 
-        # ── 2. Simular processamento pesado de IA ───
-        # TODO(AGENT_SYSTEM): Aqui e o ponto exato de integracao.
-        # Em producao, substituir o bloco abaixo por:
-        #
-        #   from app.domains.agent_system.agents import AgenteSupervisor
-        #   supervisor = AgenteSupervisor()
-        #   resultado = supervisor.analisar_depoimento(
-        #       depoimento=depoimento,
-        #       depoimentos_anteriores=depoimentos_anteriores,
-        #   )
-        #
-        # O AgenteSupervisor orquestra:
-        #   1. AgenteAnalistaLogico → detecta contradicoes semanticas
-        #   2. AgenteExtrator → extrai entidades (datas, locais, pessoas)
-        #   3. O proprio Supervisor → valida e consolida antes de retornar
-        time.sleep(5)
-
-        # ── 3. Analise mock (heuristicas) ───────────
-        texto_lower = depoimento.texto_depoimento.lower()
-
-        # Detectar marcadores de incerteza
-        incertezas = [m for m in MARCADORES_INCERTEZA if m in texto_lower]
-
-        # Comparar com depoimentos anteriores do mesmo processo
+        # ── 2. Coletar depoimentos anteriores ───────
         depoimentos_anteriores = (
             db.query(Depoimento)
             .filter(
@@ -131,46 +85,84 @@ def analisar_contradicao_testemunhas_task(self, depoimento_id: int) -> dict:
             .all()
         )
 
-        contradicoes = []
-        for dep_anterior in depoimentos_anteriores:
-            texto_ant = dep_anterior.texto_depoimento.lower()
-            for afirmacao, negacao in PARES_CONTRADITORIOS:
-                if afirmacao in texto_lower and negacao in texto_ant:
-                    contradicoes.append(
-                        f'Testemunha atual diz "{afirmacao}" mas '
-                        f'{dep_anterior.testemunha_nome} afirmou "{negacao}"'
-                    )
-                elif negacao in texto_lower and afirmacao in texto_ant:
-                    contradicoes.append(
-                        f'Testemunha atual diz "{negacao}" mas '
-                        f'{dep_anterior.testemunha_nome} afirmou "{afirmacao}"'
-                    )
+        anteriores_formatados = [
+            {
+                "nome": d.testemunha_nome,
+                "texto": d.texto_depoimento,
+            }
+            for d in depoimentos_anteriores
+        ]
 
-        # ── 4. Calcular score e montar relatorio ────
-        score = 1.0
-        score -= len(incertezas) * 0.08
-        score -= len(contradicoes) * 0.15
-        if len(texto_lower) < 100:
-            score -= 0.10
-        score = round(max(0.0, min(1.0, score)), 4)
+        # ── 3. Analisar via Gemini (ou fallback) ────
+        agent = GeminiLegalAgent()
+        resultado_ia = agent.analisar_contradicoes_depoimentos(
+            depoimento_atual={
+                "nome": depoimento.testemunha_nome,
+                "texto": depoimento.texto_depoimento,
+            },
+            depoimentos_anteriores=anteriores_formatados if anteriores_formatados else None,
+        )
 
+        # ── 4. Extrair dados do resultado ───────────
+        score = resultado_ia.get("score_confiabilidade", 0.5)
+        score = round(max(0.0, min(1.0, float(score))), 4)
+
+        total_contradicoes = resultado_ia.get("total_contradicoes", 0)
+        total_incertezas = resultado_ia.get("total_incertezas", 0)
+
+        # Montar relatorio legivel
         partes_relatorio = []
-        if incertezas:
-            partes_relatorio.append(
-                f"Marcadores de incerteza ({len(incertezas)}): "
-                + ", ".join(f'"{m}"' for m in incertezas)
-            )
-        if contradicoes:
-            partes_relatorio.append(
-                f"Contradicoes detectadas ({len(contradicoes)}): "
-                + "; ".join(contradicoes)
-            )
+
+        if total_incertezas > 0:
+            incertezas = resultado_ia.get("incertezas", [])
+            marcadores = [
+                i.get("marcador", "") for i in incertezas if isinstance(i, dict)
+            ]
+            if marcadores:
+                partes_relatorio.append(
+                    f"Marcadores de incerteza ({total_incertezas}): "
+                    + ", ".join(f'"{m}"' for m in marcadores if m)
+                )
+
+        if total_contradicoes > 0:
+            contradicoes = resultado_ia.get("contradicoes", [])
+            descricoes = []
+            for c in contradicoes:
+                if isinstance(c, dict):
+                    explicacao = c.get("explicacao", "")
+                    t1 = c.get("testemunha_1", "")
+                    a1 = c.get("afirmacao_1", "")
+                    t2 = c.get("testemunha_2", "")
+                    a2 = c.get("afirmacao_2", "")
+                    if t1 and a1 and t2 and a2:
+                        descricoes.append(
+                            f'Testemunha atual diz "{a1}" mas '
+                            f'{t2} afirmou "{a2}"'
+                        )
+                    elif explicacao:
+                        descricoes.append(explicacao)
+            if descricoes:
+                partes_relatorio.append(
+                    f"Contradicoes detectadas ({total_contradicoes}): "
+                    + "; ".join(descricoes)
+                )
+
+        # Adicionar resumo da IA se disponivel
+        resumo_ia = resultado_ia.get("resumo_analise", "")
+        if resumo_ia and not partes_relatorio:
+            partes_relatorio.append(resumo_ia)
+
         if not partes_relatorio:
             partes_relatorio.append(
                 "Nenhuma inconsistencia detectada nesta analise preliminar."
             )
 
         relatorio = " | ".join(partes_relatorio)
+
+        # Indicar se usou Gemini ou fallback
+        modo = resultado_ia.get("_modo", "gemini")
+        if modo != "fallback_heuristico":
+            relatorio = f"[Gemini IA] {relatorio}"
 
         # ── 5. Persistir resultado e finalizar ──────
         depoimento.analise_contradicao_ia = relatorio
@@ -179,17 +171,18 @@ def analisar_contradicao_testemunhas_task(self, depoimento_id: int) -> dict:
         db.commit()
 
         logger.info(
-            f"Analise do depoimento {depoimento_id} concluida. "
-            f"Score: {score}, Contradicoes: {len(contradicoes)}"
+            f"Analise do depoimento {depoimento_id} concluida (modo={modo}). "
+            f"Score: {score}, Contradicoes: {total_contradicoes}"
         )
 
         return {
             "depoimento_id": depoimento_id,
             "score_confiabilidade": score,
-            "total_incertezas": len(incertezas),
-            "total_contradicoes": len(contradicoes),
+            "total_incertezas": total_incertezas,
+            "total_contradicoes": total_contradicoes,
             "resumo": relatorio,
             "status": "concluido",
+            "modo_analise": modo,
         }
 
     except Exception as exc:
@@ -231,8 +224,9 @@ def processar_documento_pipeline_task(
 
     Fluxo:
     1. AgenteSupervisor orquestra o AgenteExtrator
-    2. Dados sao extraidos e validados
-    3. Se salvar_processo=True, cria um Processo no banco
+    2. (Opcional) GeminiLegalAgent enriquece a extracao
+    3. Dados sao extraidos e validados
+    4. Se salvar_processo=True, cria um Processo no banco
 
     Args:
         texto: Texto bruto do documento.
