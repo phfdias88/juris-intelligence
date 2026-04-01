@@ -5,14 +5,14 @@ services:
     container_name: juris_postgres
     environment:
       POSTGRES_DB: juris_intelligence
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: juris_admin
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
     ports:
-      - "5432:5432"
+      - "${DB_PORT:-5433}:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - juris_pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U juris_admin -d juris_intelligence"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -22,7 +22,7 @@ services:
     image: redis:7-alpine
     container_name: juris_redis
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6380}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -33,18 +33,18 @@ services:
   api:
     build: .
     container_name: juris_api
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
     ports:
-      - "8000:8000"
-    volumes:
-      - .:/app
+      - "${API_PORT:-8002}:8000"
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/juris_intelligence
+      DATABASE_URL: postgresql://juris_admin:${DB_PASSWORD:-postgres}@postgres:5432/juris_intelligence
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
-      SECRET_KEY: troque-esta-chave-em-producao
-      DEBUG: "true"
+      SECRET_KEY: ${SECRET_KEY:-troque-em-producao}
+      DEBUG: "false"
     depends_on:
       postgres:
         condition: service_healthy
@@ -55,11 +55,9 @@ services:
   worker:
     build: .
     container_name: juris_worker
-    command: celery -A app.core.celery_app worker --loglevel=info --pool=solo
-    volumes:
-      - .:/app
+    command: celery -A app.core.celery_app worker --loglevel=info --pool=solo --concurrency=1
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/juris_intelligence
+      DATABASE_URL: postgresql://juris_admin:${DB_PASSWORD:-postgres}@postgres:5432/juris_intelligence
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
@@ -70,4 +68,4 @@ services:
         condition: service_healthy
 
 volumes:
-  postgres_data:
+  juris_pg_data:
