@@ -1,0 +1,30 @@
+# ── Framework Web ────────────────────────────────
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.12
+
+# ── Banco de Dados ───────────────────────────────
+sqlalchemy==2.0.35
+alembic==1.13.3
+psycopg2-binary==2.9.9
+
+# ── Validacao ────────────────────────────────────
+pydantic==2.9.2
+pydantic-settings==2.5.2
+
+# ── Autenticacao ─────────────────────────────────
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# ── Processamento Assincrono ─────────────────────
+celery==5.4.0
+redis==5.2.1
+
+# ── Utilitarios ──────────────────────────────────
+python-dotenv==1.0.1
+PyPDF2==3.0.1
+
+# ── IA / LLM (preparado para Fase 2) ────────────
+# langchain==0.3.7
+# langchain-openai==0.2.9
+# openai==1.54.5
