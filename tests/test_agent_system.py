@@ -56,8 +56,9 @@ def test_processar_texto_com_salvamento(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["aprovado"] is True
-    # Task foi disparada em background
-    assert any("Task ID" in a for a in body["alertas"])
+    # Processo criado de forma sincrona — retorna o ID
+    assert body["processo_criado_id"] is not None
+    assert any("Processo criado" in a for a in body["alertas"])
 
 
 def test_agente_extrator_isolado():

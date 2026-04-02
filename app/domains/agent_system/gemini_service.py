@@ -31,9 +31,14 @@ logger = logging.getLogger(__name__)
 # ════════════════════════════════════════════════════
 
 SYSTEM_INSTRUCTION_ANALISE_CONTRADICOES = """
-Voce e um Juiz Investigador especializado em analise de depoimentos judiciais brasileiros.
-Sua funcao e analisar depoimentos de testemunhas e identificar contradicoes logicas,
-incertezas e inconsistencias factuais com rigor tecnico.
+Voce e um Arquiteto de Dados Juridicos e Investigador Senior.
+Sua missao e analisar depoimentos de testemunhas em processos judiciais brasileiros,
+identificando inconsistencias, contradicoes logicas e estimando o risco processual.
+
+REGRAS ESTRITAS DE SAIDA:
+1. Voce DEVE retornar APENAS um objeto JSON valido.
+2. NAO inclua marcacoes de markdown (como ```json ou ```).
+3. NAO inclua nenhum texto antes ou depois do JSON.
 
 REGRAS DE ANALISE:
 1. Compare cada depoimento com TODOS os outros do mesmo processo.
@@ -50,13 +55,12 @@ CRITERIOS PARA O SCORE:
 - 0.1-0.3: Contradicoes graves ou muitas incertezas
 - 0.0: Depoimento completamente inconsistente
 
-VOCE DEVE RESPONDER EXCLUSIVAMENTE EM JSON VALIDO, sem markdown, sem comentarios.
-O formato obrigatorio e:
-
+FORMATO JSON ESPERADO:
 {
     "score_confiabilidade": 0.85,
     "total_contradicoes": 2,
     "total_incertezas": 1,
+    "risco_geral": "BAIXO",
     "contradicoes": [
         {
             "tipo": "CONTRADICAO_DIRETA",
@@ -80,14 +84,49 @@ O formato obrigatorio e:
 }
 """
 
+SYSTEM_INSTRUCTION_INVESTIGADOR = """
+Voce e um Arquiteto de Dados Juridicos e Investigador Senior.
+Sua missao e analisar o texto de processos judiciais e identificar
+inconsistencias, contradicoes logicas e estimar o risco processual.
+
+REGRAS ESTRITAS DE SAIDA:
+1. Voce DEVE retornar APENAS um objeto JSON valido.
+2. NAO inclua marcacoes de markdown (como ```json ou ```).
+3. NAO inclua nenhum texto antes ou depois do JSON.
+
+FORMATO JSON ESPERADO:
+{
+  "risco_geral": "BAIXO | MEDIO | ALTO",
+  "resumo_analise": "Uma frase resumindo o principal ponto de atencao.",
+  "depoimentos_e_fatos": [
+    {
+      "autor_ou_testemunha": "Nome da pessoa ou Documento X",
+      "texto_base": "Trecho da alegacao ou depoimento",
+      "score_ia": 0.85,
+      "analise_contradicao_ia": "Explicacao direta: por que isso e uma contradicao em relacao ao resto do processo? Se nao houver, diga Consistente."
+    }
+  ]
+}
+
+REGRAS:
+- score_ia e um float de 0.0 a 1.0, onde 1.0 e totalmente consistente e 0.0 e totalmente contraditorio
+- Se nao houver depoimentos explicitos, analise as alegacoes das partes (autor, reu, peticoes)
+- Identifique trechos que possam ser questionados em audiencia
+- Se um campo nao puder ser extraido, use null
+- Nunca invente dados. Analise apenas o que esta no texto.
+"""
+
 SYSTEM_INSTRUCTION_EXTRACAO_DOCUMENTO = """
 Voce e um Assistente Juridico especializado em extracao de dados de documentos
 processuais brasileiros. Sua funcao e ler o documento completo e extrair todas
 as informacoes relevantes com precisao.
 
-VOCE DEVE RESPONDER EXCLUSIVAMENTE EM JSON VALIDO, sem markdown, sem comentarios.
-O formato obrigatorio e:
+REGRAS ESTRITAS DE SAIDA:
+1. Voce DEVE retornar APENAS um objeto JSON valido.
+2. NAO inclua marcacoes de markdown (como ```json ou ```).
+3. NAO inclua nenhum texto antes ou depois do JSON.
 
+FORMATO JSON ESPERADO:
 {
     "numero_cnj": "1234567-89.2024.8.26.0100",
     "tribunal": "TJSP",
@@ -324,6 +363,54 @@ class GeminiLegalAgent:
             return self._fallback_analise_contradicoes(
                 depoimento_atual, depoimentos_anteriores
             )
+
+    # ── ANALISE PROFUNDA (PROMPT INVESTIGADOR) ────────
+
+    def analisar_processo_completo(self, texto: str) -> dict[str, Any]:
+        """Analise profunda de um processo inteiro usando o Prompt Investigador.
+
+        Identifica riscos, contradicoes entre alegacoes das partes,
+        e pontos vulneraveis para audiencia.
+
+        Args:
+            texto: Texto completo do processo judicial.
+
+        Returns:
+            dict com risco_geral, resumo_analise, depoimentos_e_fatos.
+        """
+        if not self.is_available:
+            logger.info("Gemini indisponivel — analise profunda nao disponivel.")
+            return {
+                "risco_geral": "MEDIO",
+                "resumo_analise": "Analise profunda indisponivel (Gemini offline). Usando dados da extracao.",
+                "depoimentos_e_fatos": [],
+            }
+
+        user_prompt = (
+            "ANALISE O SEGUINTE PROCESSO JUDICIAL COMPLETO.\n"
+            "Identifique todas as inconsistencias, contradicoes entre as partes, "
+            "e avalie o risco processual geral.\n\n"
+            f"{texto}\n\n"
+            "Retorne o JSON conforme o formato especificado nas instrucoes."
+        )
+
+        try:
+            result = self._call_gemini(
+                system_instruction=SYSTEM_INSTRUCTION_INVESTIGADOR,
+                user_prompt=user_prompt,
+            )
+            result.setdefault("risco_geral", "MEDIO")
+            result.setdefault("resumo_analise", "Analise concluida pelo Gemini.")
+            result.setdefault("depoimentos_e_fatos", [])
+            return result
+
+        except RuntimeError:
+            logger.warning("Gemini falhou na analise profunda.")
+            return {
+                "risco_geral": "MEDIO",
+                "resumo_analise": "Gemini falhou apos tentativas. Analise manual recomendada.",
+                "depoimentos_e_fatos": [],
+            }
 
     # ── EXTRACAO DE DOCUMENTO ────────────────────────
 

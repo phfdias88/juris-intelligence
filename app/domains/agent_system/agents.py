@@ -327,9 +327,10 @@ class AgenteSupervisor:
         """Pipeline completo de processamento de documento.
 
         Fluxo:
-        1. AgenteExtrator → extrai dados estruturados
-        2. Supervisor → valida qualidade da extracao
-        3. Retorna resultado consolidado com alertas
+        1. AgenteExtrator → extrai dados estruturados (regex)
+        2. GeminiLegalAgent → enriquece extracao com IA (quando disponivel)
+        3. Supervisor → valida qualidade da extracao
+        4. Retorna resultado consolidado com alertas
 
         Args:
             texto: Texto bruto do documento juridico.
@@ -339,9 +340,64 @@ class AgenteSupervisor:
         """
         resultado = ResultadoSupervisor()
 
-        # ── Fase 1: Extracao ─────────────────────────
+        # ── Fase 1: Extracao por regex ───────────────
         logger.info("Supervisor: acionando AgenteExtrator...")
         dados = self.extrator.executar(texto)
+
+        # ── Fase 1b: Enriquecer com Gemini ───────────
+        try:
+            from app.domains.agent_system.gemini_service import GeminiLegalAgent
+            agent = GeminiLegalAgent()
+            if agent.is_available:
+                logger.info("Supervisor: enriquecendo extracao com Gemini...")
+                gemini_dados = agent.extrair_dados_documento(texto)
+                if gemini_dados:
+                    # Preencher campos que regex nao pegou
+                    if not dados.numero_cnj and gemini_dados.get("numero_cnj"):
+                        dados.numero_cnj = gemini_dados["numero_cnj"]
+                    if not dados.tribunal and gemini_dados.get("tribunal"):
+                        dados.tribunal = gemini_dados["tribunal"]
+                    if not dados.vara and gemini_dados.get("vara"):
+                        dados.vara = gemini_dados["vara"]
+                    if not dados.tipo_acao and gemini_dados.get("tipo_acao"):
+                        dados.tipo_acao = gemini_dados["tipo_acao"]
+                    if not dados.data_distribuicao and gemini_dados.get("data_distribuicao"):
+                        dados.data_distribuicao = gemini_dados["data_distribuicao"]
+
+                    # Nomes das partes (Gemini e melhor nisso)
+                    if gemini_dados.get("autor") and not dados.nomes_partes:
+                        nomes = []
+                        if gemini_dados.get("autor"):
+                            nomes.append(gemini_dados["autor"])
+                        if gemini_dados.get("reu"):
+                            nomes.append(gemini_dados["reu"])
+                        dados.nomes_partes = nomes
+
+                    # CPFs e CNPJs extras
+                    for cpf in gemini_dados.get("cpfs", []) or []:
+                        if cpf and cpf not in dados.cpfs_encontrados:
+                            dados.cpfs_encontrados.append(cpf)
+                    for cnpj in gemini_dados.get("cnpjs", []) or []:
+                        if cnpj and cnpj not in dados.cnpjs_encontrados:
+                            dados.cnpjs_encontrados.append(cnpj)
+
+                    # Valores extras
+                    for val in gemini_dados.get("valores", []) or []:
+                        if val and val not in dados.valores_monetarios:
+                            dados.valores_monetarios.append(val)
+
+                    # Recalcular confianca com dados enriquecidos
+                    campos_preenchidos = sum([
+                        bool(dados.numero_cnj),
+                        len(dados.cpfs_encontrados) > 0 or len(dados.cnpjs_encontrados) > 0,
+                        len(dados.valores_monetarios) > 0,
+                        bool(dados.tribunal),
+                        bool(dados.tipo_acao),
+                    ])
+                    dados.confianca = round(campos_preenchidos / 5, 2)
+        except Exception as e:
+            logger.warning(f"Falha no enriquecimento Gemini: {e}")
+
         resultado.dados_extraidos = dados
 
         # ── Fase 2: Validacao do Supervisor ──────────
@@ -367,15 +423,19 @@ class AgenteSupervisor:
         resultado.aprovado = dados.confianca >= 0.4 and not dados.erros
 
         # ── Observacoes do Supervisor ────────────────
-        # TODO(LLM): Gerar observacoes com LLM baseado nos dados
         if resultado.aprovado:
             resultado.observacoes_supervisor = (
                 f"Documento processado com sucesso. "
                 f"Confianca: {dados.confianca:.0%}. "
                 f"Dados extraidos: CNJ={dados.numero_cnj}, "
                 f"{len(dados.cpfs_encontrados)} CPF(s), "
+                f"{len(dados.cnpjs_encontrados)} CNPJ(s), "
                 f"{len(dados.valores_monetarios)} valor(es)."
             )
+            if dados.nomes_partes:
+                resultado.observacoes_supervisor += (
+                    f" Partes: {', '.join(dados.nomes_partes)}."
+                )
         else:
             resultado.observacoes_supervisor = (
                 f"Documento requer atencao. "
